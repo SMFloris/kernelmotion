@@ -1,6 +1,9 @@
 #!/bin/bash
 
-modprobe -rf leapmotion
-rmmod leapmotion
-pkill dmesg
-pkill dmesg
+git pull origin
+
+sudo modprobe -rf leapmotion && rmmod leapmotion
+make && sudo insmod leapmotion.ko
+sudo modprobe -rf uvcvideo
+dmesg -wk
+
