@@ -1,0 +1,1 @@
+cmd_/home/stoica-marcu/projects/KernelMotion/leapmotion.ko := ld -r -m elf_x86_64 -T ./scripts/module-common.lds --build-id  -o /home/stoica-marcu/projects/KernelMotion/leapmotion.ko /home/stoica-marcu/projects/KernelMotion/leapmotion.o /home/stoica-marcu/projects/KernelMotion/leapmotion.mod.o
