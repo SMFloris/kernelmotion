@@ -161,20 +161,14 @@ static int leap_do_read_io(struct usb_leap *dev, size_t count)
 	printk("DOING IO!\n");
 	
 	/* prepare a read */
-	dev->bulk_in_urb->dev = dev->udev;
-	dev->bulk_in_urb->context = dev;
-	dev->bulk_in_urb->pipe = usb_rcvisocpipe(dev->udev, 0x83);
-	dev->bulk_in_urb->interval = 1;
-	dev->bulk_in_urb->transfer_flags = URB_ISO_ASAP;
-	dev->bulk_in_urb->transfer_buffer = dev->bulk_in_buffer;
-	dev->bulk_in_urb->complete = leap_read_bulk_callback;
-	dev->bulk_in_urb->number_of_packets = 25;
-	dev->bulk_in_urb->transfer_buffer_length = dev->bulk_in_size*25;
-	int j;
-	for (j=0; j < 25; j++) {
-		dev->bulk_in_urb->iso_frame_desc[j].offset = j;
-		dev->bulk_in_urb->iso_frame_desc[j].length = dev->bulk_in_size;
-	}
+	usb_fill_int_urb(dev->bulk_in_urb,
+			  dev->udev,
+		   usb_rcvbulkpipe(dev->udev,
+				   dev->bulk_in_endpointAddr),
+		   dev->bulk_in_buffer,
+		   min(dev->bulk_in_size, count),
+			  skel_read_bulk_callback,
+		   dev,1);
 	/* tell everybody to leave the URB alone */
 	spin_lock_irq(&dev->err_lock);
 	dev->ongoing_read = 1;
