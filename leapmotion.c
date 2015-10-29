@@ -167,7 +167,7 @@ static int leap_do_read_io(struct usb_leap *dev, size_t count)
 				   dev->bulk_in_endpointAddr),
 		   dev->bulk_in_buffer,
 		   min(dev->bulk_in_size, count),
-			  skel_read_bulk_callback,
+			  leap_read_bulk_callback,
 		   dev,1);
 	/* tell everybody to leave the URB alone */
 	spin_lock_irq(&dev->err_lock);
