@@ -163,10 +163,10 @@ static int leap_do_read_io(struct usb_leap *dev, size_t count)
 	/* prepare a read */
 	usb_fill_int_urb(dev->bulk_in_urb,
 			  dev->udev,
-		   usb_rcvbulkpipe(dev->udev,
+		  usb_rcvintpipe(dev->udev,
 				   dev->bulk_in_endpointAddr),
 		   dev->bulk_in_buffer,
-		   min(dev->bulk_in_size, count),
+			dev->bulk_in_size,
 			  leap_read_bulk_callback,
 		   dev,1);
 	/* tell everybody to leave the URB alone */
