@@ -1,3 +1,5 @@
 *.ko
 *.mod.c
 *.new
+*.mod.*
+*.o
