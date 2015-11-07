@@ -16,6 +16,8 @@
 
 #define MAX_TRANSFER 16407
 
+#define MIN(a,b) (((a) <= (b)) ? (a) : (b))
+
 /* table of devices that work with this driver */
 static const struct usb_device_id leap_table[] = {
     { USB_DEVICE ( USB_LEAP_VENDOR_ID, USB_LEAP_PRODUCT_ID ) },
@@ -55,6 +57,34 @@ static void leap_delete ( struct kref *kref )
     usb_put_dev ( dev->udev );
     kfree ( dev->bulk_in_buffer );
     kfree ( dev );
+}
+
+static void leap_read_bulk_callback(struct urb *urb)
+{
+	struct usb_leap *dev;
+	
+	dev = urb->context;
+	
+	printk("CALLBACK!\n");
+	
+	spin_lock(&dev->err_lock);
+	/* sync/async unlink faults aren't errors */
+	if (urb->status) {
+		if (!(urb->status == -ENOENT ||
+			urb->status == -ECONNRESET ||
+			urb->status == -ESHUTDOWN))
+			printk("Nonzero write bulk status received: %d\n",urb->status);
+		
+		dev->errors = urb->status;
+	} else {
+		dev->bulk_in_filled = urb->actual_length;
+	}
+	dev->ongoing_read = 0;
+	spin_unlock(&dev->err_lock);
+	
+	printk("Primit %d bytes\n",urb->actual_length);
+	
+	wake_up_interruptible(&dev->bulk_in_wait);
 }
 
 static int leap_open ( struct inode *inode, struct file *file )
@@ -98,36 +128,8 @@ static int leap_open ( struct inode *inode, struct file *file )
     /* save our object in the file's private structure */
     file->private_data = dev;
 
-    printk ("Am reusit sa deschid device-ul!\n" );
-
 exit:
     return retval;
-}
-
-static void leap_read_bulk_callback(struct urb *urb)
-{
-	struct usb_leap *dev;
-	
-	dev = urb->context;
-	
-	spin_lock(&dev->err_lock);
-	/* sync/async unlink faults aren't errors */
-	if (urb->status) {
-		if (!(urb->status == -ENOENT ||
-			urb->status == -ECONNRESET ||
-			urb->status == -ESHUTDOWN))
-			printk("Nonzero write bulk status received: %d\n",urb->status);
-
-		dev->errors = urb->status;
-	} else {
-		dev->bulk_in_filled = urb->actual_length;
-	}
-	dev->ongoing_read = 0;
-	spin_unlock(&dev->err_lock);
-	
-	printk("Primit %d bytes\n",urb->actual_length);
-	
-	wake_up_interruptible(&dev->bulk_in_wait);
 }
 
 static int leap_flush(struct file *file, fl_owner_t id)
@@ -161,14 +163,14 @@ static int leap_do_read_io(struct usb_leap *dev, size_t count)
 	printk("DOING IO!\n");
 	
 	/* prepare a read */
-	usb_fill_int_urb(dev->bulk_in_urb,
+	usb_fill_bulk_urb(dev->bulk_in_urb,
 			  dev->udev,
-		  usb_rcvintpipe(dev->udev,
+		  usb_rcvbulkpipe(dev->udev,
 				   dev->bulk_in_endpointAddr),
 		   dev->bulk_in_buffer,
 			dev->bulk_in_size,
 			  leap_read_bulk_callback,
-		   dev,1);
+		   dev);
 	/* tell everybody to leave the URB alone */
 	spin_lock_irq(&dev->err_lock);
 	dev->ongoing_read = 1;
@@ -197,7 +199,7 @@ static ssize_t leap_read(struct file *file, char *buffer, size_t count,
 						 loff_t *ppos)
 {
 	struct usb_leap *dev;
-	int rv;
+	int rv, read_cnt;
 	bool ongoing_io;
 	
 	printk("Reading this shit!\n");
@@ -210,101 +212,20 @@ static ssize_t leap_read(struct file *file, char *buffer, size_t count,
 	
 	printk("Bulk in is ok and count also!\n");
 	
-	/* no concurrent readers */
-	rv = mutex_lock_interruptible(&dev->io_mutex);
-	if (rv < 0)
+	/* Read the data from the bulk endpoint */
+	rv = usb_bulk_msg(dev->udev, usb_rcvbulkpipe(dev->udev, 0x83),
+			  dev->bulk_in_buffer, 16407, &read_cnt, 10000);
+	if (rv)
+	{
+		printk(KERN_ERR "Bulk message returned %d\n", rv);
 		return rv;
-	
-	if (!dev->interface) {		/* disconnect() was called */
-		rv = -ENODEV;
-		goto exit;
+	}
+	if (copy_to_user(buffer, dev->bulk_in_buffer, MIN(count, read_cnt)))
+	{
+		return -EFAULT;
 	}
 	
-	/* if IO is under way, we must not touch things */
-retry:
-	spin_lock_irq(&dev->err_lock);
-	ongoing_io = dev->ongoing_read;
-	spin_unlock_irq(&dev->err_lock);
-	
-	if (ongoing_io) {
-		/* nonblocking IO shall not wait */
-		if (file->f_flags & O_NONBLOCK) {
-			rv = -EAGAIN;
-			goto exit;
-		}
-		/*
-		 * IO may take forever
-		 * hence wait in an interruptible state
-		 */
-		rv = wait_event_interruptible(dev->bulk_in_wait, (!dev->ongoing_read));
-		if (rv < 0)
-			goto exit;
-	}
-	
-	/* errors must be reported */
-	rv = dev->errors;
-	if (rv < 0) {
-		/* any error is reported once */
-		dev->errors = 0;
-		/* to preserve notifications about reset */
-		rv = (rv == -EPIPE) ? rv : -EIO;
-		/* report it */
-		goto exit;
-	}
-	
-	/*
-	 * if the buffer is filled we may satisfy the read
-	 * else we need to start IO
-	 */
-	
-	if (dev->bulk_in_filled) {
-		/* we had read data */
-		size_t available = dev->bulk_in_filled - dev->bulk_in_copied;
-		size_t chunk = min(available, count);
-		
-		if (!available) {
-			/*
-			 * all data has been used
-			 * actual IO needs to be done
-			 */
-			rv = leap_do_read_io(dev, count);
-			if (rv < 0)
-				goto exit;
-			else
-				goto retry;
-		}
-		/*
-		 * data is available
-		 * chunk tells us how much shall be copied
-		 */
-		
-		if (copy_to_user(buffer,
-			dev->bulk_in_buffer + dev->bulk_in_copied,
-			chunk))
-			rv = -EFAULT;
-		else
-			rv = chunk;
-		
-		dev->bulk_in_copied += chunk;
-		
-		/*
-		 * if we are asked for more than we have,
-		 * we start IO but don't wait
-		 */
-		if (available < count)
-			leap_do_read_io(dev, count - chunk);
-	} else {
-		/* no data in the buffer */
-		rv = leap_do_read_io(dev, count);
-		if (rv < 0)
-			goto exit;
-		else
-			goto retry;
-	}
-exit:
-	printk("Read exited with: %d!\n",rv);
-	mutex_unlock(&dev->io_mutex);
-	return rv;
+	return MIN(count, read_cnt);
 }
 
 static void leap_write_bulk_callback(struct urb *urb)
@@ -684,12 +605,13 @@ static int leap_probe ( struct usb_interface *interface,
 	    goto error;
     }
     
+    /*
     retval = usb_control_msg(dev->udev,ctrlPipe,USB_REQ_SET_INTERFACE,0x0,0x00,0x01,NULL,0,500);
     if(retval != 0)
     {
 	    printk ( "Nu am putut schimba interfata!\n" );
 	    goto error;    
-    }
+    }*/
 
     /* save our data pointer in this interface device */
     usb_set_intfdata ( interface, dev );
